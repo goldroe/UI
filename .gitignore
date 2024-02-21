@@ -1,0 +1,8 @@
+build/*
+*.exe
+*.ilk
+*.pdb
+*.obj
+
+*.raddbg 
+*.rdbg
