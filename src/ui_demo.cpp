@@ -43,6 +43,33 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
 
     LRESULT result = 0;
     switch (message) {
+    case WM_SIZE: {
+        // NOTE: Resize render target view
+        if (swapchain) {
+            d3d_context->OMSetRenderTargets(0, 0, 0);
+
+            // Release all outstanding references to the swap chain's buffers.
+            render_target->Release();
+
+            // Preserve the existing buffer count and format.
+            // Automatically choose the width and height to match the client rect for HWNDs.
+            HRESULT hr = swapchain->ResizeBuffers(0, 0, 0, DXGI_FORMAT_UNKNOWN, 0);
+                                            
+            // Perform error handling here!
+
+            // Get buffer and create a render-target-view.
+            ID3D11Texture2D* buffer;
+            hr = swapchain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**) &buffer);
+            // Perform error handling here!
+
+            hr = d3d_device->CreateRenderTargetView(buffer, NULL, &render_target);
+            // Perform error handling here!
+            buffer->Release();
+
+            d3d_context->OMSetRenderTargets(1, &render_target, NULL);
+        }
+        break;
+    }
     case WM_CLOSE:
         PostQuitMessage(0);
         break;
@@ -177,6 +204,7 @@ int main() {
 
     LARGE_INTEGER start_counter = win32_get_wall_clock();
     LARGE_INTEGER last_counter = start_counter;
+
     bool window_should_close = false;
     while (!window_should_close) {
         MSG message{};
@@ -198,32 +226,42 @@ int main() {
 
         UI_NewFrame(window);
 
-        UI_BeginRow();
-        UI_Button("File");
-        // UI_Button("View");
-        UI_Button("Edit");
-        // UI_Button("Preferences");
-        UI_Button("Help");
-        UI_EndRow();
+        UI_RowBegin("Menu");
+            if (UI_Button("File")) {
+                printf("File\n");
+            }
+            if (UI_Button("Edit")) {
+                printf("Edit\n");
+            }
+            if (UI_Button("Help")) {
+                printf("Help\n");
+            }
+            // UI_BorderColorPop();
+        UI_RowEnd();
 
-        UI_Slider("Slider", &slider, 0.0f, 1.0f);
+        UI_Widget *widget = UI_WidgetBuild("Table", (UI_WidgetFlags)(UI_WidgetFlags_DrawBorder | UI_WidgetFlags_DrawBackground));
+        widget->pref_size[UI_Axis_X] = UI_SIZE_PARENT(0.5f);
+        widget->pref_size[UI_Axis_Y] = UI_SIZE_PARENT(1.0f);
 
-        if (UI_Button("Hello World!")) {
-            printf("Hello World!\n");
-        }
+        ui_state.parent_stack.push(widget);
 
-        if (UI_Field("Field", sample_field, sample_len)) {
-            printf("%s\n", sample_field);
-        }
+        UI_RowBegin("TableHeader");
+            UI_Button("First Name");
+            UI_Button("Last Name");
+            UI_Button("ID");
+        UI_RowEnd();
 
-        UI_Checkbox("Display FPS", &display_fps);
+        // UI_Slider("Slider", &slider, 0.0f, 1.0f);
 
-        if (display_fps) {
-            UI_Labelf("FPS:  %d", (int)frames_per_second);
-        }
+        // if (UI_Field("Field", sample_field, sample_len)) {
+        //     printf("%s\n", sample_field);
+        // }
 
+        // UI_Checkbox("Display FPS", &display_fps);
 
-        UI_EndFrame();
+        // if (display_fps) {
+        //     UI_Labelf("FPS:  %d", (int)frames_per_second);
+        // }
 
         float bg_color[4] = {1, 1, 1, 1};
         d3d_context->ClearRenderTargetView(render_target, bg_color);
@@ -241,7 +279,7 @@ int main() {
 
         d3d_context->OMSetBlendState(nullptr, NULL, 0xffffffff);
 
-        UI_Render();
+        UI_EndFrame();
 
         swapchain->Present(0, 0);
 
@@ -256,8 +294,8 @@ int main() {
         float seconds_elapsed = 1000.0f * win32_get_seconds_elapsed(last_counter, end_counter);
         frames_per_second = 1000.0f / seconds_elapsed;
         // printf("seconds: %f\n", seconds_elapsed);
-        last_counter = end_counter;
-    }
+        last_counter = end_counter;}
+    
 
     return 0;
 }
