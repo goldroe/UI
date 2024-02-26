@@ -1,7 +1,7 @@
-// TODO: Think up a layout structure
-// TODO: Think up a way to retain data (copy data of widgets with labels that match widgets in current and last frame?)
 // TODO: Pack some icons, and font textures into a texture atlas (and a single white pixel for rectangles?)
 // TODO: Shapes like rounded rectangles and circles
+// TODO: Think up a way to specify widget attributes (push/pop?)
+// TODO: Hash the widgets and identify with key
 
 #ifdef _MSC_VER
 #define _CRT_SECURE_NO_WARNINGS
@@ -21,6 +21,23 @@
 #include FT_FREETYPE_H
 
 UI_State ui_state;
+
+bool UI_InRect(int x, int y, UI_Rect rect) {
+    if (x >= rect.x && x <= (rect.x + rect.width) &&
+        y >= rect.y && y <= (rect.y + rect.height)) {
+        return true;
+    }
+    return false;
+}
+
+void UI_BorderColor(float r, float g, float b, float a) {
+    UI_Vec4 color = {r, g, b, a};
+    ui_state.border_color_stack.push(color);
+}
+
+void UI_BorderColorPop() {
+    ui_state.border_color_stack.pop();
+}
 
 UI_Widget *active_widget = nullptr;
 
@@ -42,8 +59,6 @@ const UI_Vec4 WHITE = {1.0f, 1.0f, 1.0f, 1.0f};
 const UI_Vec4 DARKGRAY  = {0.5f, 0.5, 0.5, 1.0f};
 const UI_Vec4 GRAY  = {0.86f, 0.86f, 0.86f, 1.0f};
 const UI_Vec4 LIGHTGRAY  = {0.93f, 0.93f, 0.93f, 1.0f};
-
-#define NEXT_PX 40.0f
 
 bool UI_Win32WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
@@ -103,7 +118,9 @@ void UI_Render() {
         vb_desc.ByteWidth = draw_data->vertex_capacity * sizeof(UI_Vertex);
         vb_desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
         vb_desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        assert(SUCCEEDED(device->CreateBuffer(&vb_desc, nullptr, &backend->vertex_buffer)));
+        if (device->CreateBuffer(&vb_desc, nullptr, &backend->vertex_buffer) != S_OK) {
+            return;
+        }
         backend->vertex_buffer_size = draw_data->vertex_capacity;
     }
 
@@ -114,13 +131,16 @@ void UI_Render() {
         cb_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         cb_desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
 
-        assert(SUCCEEDED(device->CreateBuffer(&cb_desc, nullptr, &backend->constant_buffer)));
+        if (device->CreateBuffer(&cb_desc, nullptr, &backend->constant_buffer) != S_OK) {
+            return;
+        }
     }
 
     // NOTE: Upload vertex list data to vertex buffer
     D3D11_MAPPED_SUBRESOURCE vertex_resource{};
-    HRESULT hr = context->Map(backend->vertex_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &vertex_resource);
-    assert(SUCCEEDED(hr));
+    if (context->Map(backend->vertex_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &vertex_resource) != S_OK) {
+        return;
+    }
     memcpy(vertex_resource.pData, draw_data->vertex_list, draw_data->vertex_count * sizeof(UI_Vertex));
     context->Unmap(backend->vertex_buffer, 0);
 
@@ -142,8 +162,9 @@ void UI_Render() {
         mvp[3][2] = (near) / (near - far);
 
         D3D11_MAPPED_SUBRESOURCE mapped_resource{};
-        hr = context->Map(backend->constant_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_resource);
-        assert(SUCCEEDED(hr));
+        if (context->Map(backend->constant_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_resource) != S_OK) {
+            return;
+        }
         DX11_Constant_Buffer *constant_buffer = (DX11_Constant_Buffer *)mapped_resource.pData;
         memcpy(constant_buffer->mvp, mvp, sizeof(mvp));
         context->Unmap(backend->constant_buffer, 0);
@@ -305,7 +326,7 @@ void UI_DX11CreateDeviceObjects(DX11_Backend_Data *bd) {
 
     // FONT TEXTURE VIEW
     const char *font_name = "fonts/arial.ttf";
-    int font_height = 14;
+    int font_height = 16;
     FontAtlas atlas{};
     {
         FT_Library ft_lib;
@@ -424,41 +445,6 @@ void UI_DX11CreateDeviceObjects(DX11_Backend_Data *bd) {
         ui_state.font_atlas = atlas;
     }
 
-#if 0
-    // OLD FONT TEXTURE VIEW
-    {
-        int width, height, n;
-        unsigned char *data = stbi_load("font.png", &width, &height, &n, 4);
-        assert(data);
-
-        D3D11_TEXTURE2D_DESC desc{};
-        desc.Width = width;
-        desc.Height = height;
-        desc.MipLevels = 1;
-        desc.ArraySize = 1;
-        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        desc.SampleDesc.Count = 1;
-        desc.SampleDesc.Quality = 0;
-        desc.Usage = D3D11_USAGE_IMMUTABLE;
-        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        desc.CPUAccessFlags = 0;
-
-        ID3D11Texture2D *texture = nullptr;
-        D3D11_SUBRESOURCE_DATA sr_data{};
-        sr_data.pSysMem = data;
-        sr_data.SysMemPitch = desc.Width * 4;
-        sr_data.SysMemSlicePitch = 0;
-        HRESULT hr = bd->device->CreateTexture2D(&desc, &sr_data, &texture);
-        assert(SUCCEEDED(hr));
-        assert(texture != nullptr);
-
-        bd->device->CreateShaderResourceView(texture, nullptr, &bd->font_texture_view);
-        // texture->Release();
-        // stbi_image_free(data);
-    }
-#endif
-
-
     // FONT SAMPLER
     {
         D3D11_SAMPLER_DESC desc{};
@@ -480,64 +466,27 @@ void UI_DX11NewFrame() {
     }
 }
 
-
-void UI_WidgetPush(UI_Widget *widget) {
-    UI_Widget *tail = nullptr;
-    for (tail = ui_state.current_parent; tail != nullptr; tail = tail->next) {
-        if (tail->next == nullptr)
-            break;
+float UI_GetTextWidthRanged(char *text, int start, int end, FontAtlas *font) {
+    float width = 0.0f;
+    for (char *ptr = text + start; ptr < text + end; ptr++) {
+        FontGlyph glyph = font->glyphs[*ptr];
+        width += glyph.ax;
     }
-
-    if (tail) {
-        tail->next = widget;
-    } else {
-        ui_state.current_parent = widget;
-    }
+    return roundf(width);
 }
 
-UI_Widget *UI_FindWidget(char *label) {
-    UI_Widget *widget = nullptr;
-    for (widget = ui_state.parent; widget != nullptr; widget = widget->next) {
-        if (strcmp(widget->label, label) == 0) {
-            break;
+float UI_GetTextWidth(char *text, FontAtlas *font) {
+    return UI_GetTextWidthRanged(text, 0, (int)strlen(text), font);
+}
+
+float UI_GetTextHeight(char *text, FontAtlas *font) {
+    float height = font->glyph_height;
+    for (char *ptr = text; *ptr; ptr++) {
+        if (*ptr == '\n') {
+            height += font->glyph_height;
         }
     }
-    return widget;
-}
-
-UI_Widget *UI_WidgetCreate(char *label) {
-    UI_Widget *widget = (UI_Widget *)calloc(1, sizeof(UI_Widget));
-    widget->label = (char *)malloc(strlen(label) + 1);
-    strcpy(widget->label, label);
-    widget->next = nullptr;
-    return widget;
-}
-
-UI_Widget *UI_WidgetCopy(UI_Widget *widget) {
-    UI_Widget *result = (UI_Widget *)calloc(1, sizeof(UI_Widget));
-    result->active = widget->active;
-    result->label = (char *)malloc(strlen(widget->label) + 1);
-    strcpy(result->label, widget->label);
-    result->next = nullptr;
-    result->cursor = widget->cursor;
-    result->text_offset = widget->text_offset;
-    return result;
-}
-
-void UI_WidgetActivate(UI_Widget *widget) {
-    widget->active = true;
-    active_widget = UI_WidgetCopy(widget);
-}
-
-void UI_WidgetDestroy(UI_Widget *widget) {
-    assert(widget);
-    free(widget->label);
-    free(widget);
-}
-
-void UI_WidgetDeactivate() {
-    UI_WidgetDestroy(active_widget);
-    active_widget = nullptr;
+    return roundf(height);
 }
 
 void UI_PushVertex(UI_Draw_Data *draw_data, UI_Vertex vertex) {
@@ -563,66 +512,6 @@ void UI_DrawLine(UI_Vec2 start, UI_Vec2 end, UI_Vec4 color, float thickness) {
         vertices[i].color = color;
         UI_PushVertex(&ui_state.draw_data, vertices[i]);
     }
-}
-
-void UI_NewFrame(HWND window) {
-    RECT client_rect;
-    GetClientRect(window, &client_rect);
-    UI_Vec2 dim = {(float)(client_rect.right - client_rect.left), (float)(client_rect.bottom - client_rect.top)};
-    ui_state.draw_data.target_size = dim;
-    ui_state.draw_data.target_pos = {0.0f, 0.0f};
-    ui_state.draw_data.vertex_count = 0;
-
-    ui_state.next_position = UI_Vec2(NEXT_PX, 10.0f);
-
-    UI_DX11NewFrame();
-}
-
-void UI_EndFrame() {
-    ui_state.mouse_pressed = false;
-    ui_state.key_down = false;
-
-    UI_Widget *widget = ui_state.parent;
-    while (widget) {
-        UI_Widget *next = widget->next;
-        free(widget);
-        widget = next;
-    }
-
-    ui_state.parent = ui_state.current_parent;
-    ui_state.current_parent = nullptr;
-
-    // NOTE: If active widget wasn't built this frame then no longer active
-    if (UI_AnyActive()) {
-        UI_Widget *active = UI_FindWidget(active_widget->label);
-        if (active == nullptr) {
-            active_widget = nullptr;
-        }    
-    }
-
-}
-
-float UI_GetTextWidthRanged(char *text, int start, int end, FontAtlas *font) {
-    float width = 0.0f;
-    for (char *ptr = text + start; ptr < text + end; ptr++) {
-        FontGlyph glyph = font->glyphs[*ptr];
-        width += glyph.ax;
-    }
-    return roundf(width);
-}
-
-float UI_GetTextWidth(char *text, FontAtlas *font) {
-    return UI_GetTextWidthRanged(text, 0, (int)strlen(text), font);
-}
-
-int UI_GetTextHeight(char *text, FontAtlas *font) {
-    float height = 0.0f;
-    for (char *ptr = text; *ptr; ptr++) {
-        if (*ptr == '\n') {
-            height += font->glyph_height;
-        }
-    }
-    return (int)roundf(height);
 }
 
 void UI_DrawTextOffset(char *text, FontAtlas *font, UI_Vec2 position, float offset) {
@@ -699,7 +588,7 @@ void UI_DrawText(char *text, FontAtlas *font, UI_Vec2 position) {
     }
 }
 
-void UI_DrawSolidRect(UI_Rect rect, UI_Vec4 color) {
+void UI_DrawRect(UI_Rect rect, UI_Vec4 color) {
     float x0 = (float)rect.x;
     float y0 = (float)rect.y;
     float x1 = (float)rect.x + rect.width;
@@ -731,17 +620,15 @@ void UI_DrawRectOutline(UI_Rect rect, UI_Vec4 color) {
     float x1 = rect.x + rect.width;
     float y1 = rect.y + rect.height;
 
-    UI_DrawSolidRect(rect, color);
-
     float thickness = 1;
     // top 
-    UI_DrawSolidRect({x0, y0, rect.width, thickness}, BLACK);
+    UI_DrawRect({x0, y0, rect.width, thickness}, color);
     // bottom
-    UI_DrawSolidRect({x0, y1 - thickness, rect.width, thickness}, BLACK);
+    UI_DrawRect({x0, y1 - thickness, rect.width, thickness}, color);
     // left
-    UI_DrawSolidRect({x0, y0, thickness, rect.height}, BLACK);
+    UI_DrawRect({x0, y0, thickness, rect.height}, color);
     // right
-    UI_DrawSolidRect({x1 - thickness, y0, thickness, rect.height}, BLACK);
+    UI_DrawRect({x1 - thickness, y0, thickness, rect.height}, color);
 }
 
 
@@ -756,13 +643,326 @@ void UI_DrawCheckMark(UI_Vec2 position, UI_Vec2 bound, UI_Vec4 color) {
     UI_DrawLine(middle, right_tick, color, 2.0f);
 }
 
-bool UI_InRect(int x, int y, UI_Rect rect) {
-    if (x >= rect.x && x <= (rect.x + rect.width) &&
-        y >= rect.y && y <= (rect.y + rect.height)) {
-        return true;
-    }
-    return false;
+UI_Widget *UI_GetParent() {
+    UI_Widget *parent = nullptr;
+    if (!ui_state.parent_stack.empty()) parent = ui_state.parent_stack.top();
+    return parent;
 }
+
+UI_Widget *UI_FindWidget(char *label) {
+    UI_Widget *result = nullptr;
+    for (int i = 0; i < ui_state.old_list.size(); i++) {
+        UI_Widget *widget = ui_state.old_list[i];
+        if (strcmp(widget->label, label) == 0) {
+            result = widget;
+            break;
+        }
+    }
+    return result;
+}
+
+UI_Widget *UI_WidgetCreate() {
+    UI_Widget *widget = (UI_Widget *)calloc(1, sizeof(UI_Widget));
+    return widget;
+}
+
+UI_Widget *UI_WidgetCreate(char *label) {
+    UI_Widget *widget = (UI_Widget *)calloc(1, sizeof(UI_Widget));
+    widget->label = (char *)malloc(strlen(label) + 1);
+    strcpy(widget->label, label);
+    widget->next = nullptr;
+    return widget;
+}
+
+UI_Widget *UI_WidgetCopy(UI_Widget *widget) {
+    UI_Widget *result = (UI_Widget *)calloc(1, sizeof(UI_Widget));
+    memcpy(result, widget, sizeof(UI_Widget));
+    result->active = widget->active;
+    result->label = (char *)malloc(strlen(widget->label) + 1);
+    strcpy(result->label, widget->label);
+    result->next = nullptr;
+    return result;
+}
+
+void UI_WidgetActivate(UI_Widget *widget) {
+    widget->active = true;
+    active_widget = UI_WidgetCopy(widget);
+}
+
+void UI_WidgetDestroy(UI_Widget *widget) {
+    assert(widget);
+    free(widget->label);
+    free(widget);
+}
+
+void UI_WidgetDeactivate() {
+    UI_WidgetDestroy(active_widget);
+    active_widget = nullptr;
+}
+
+UI_Widget *UI_WidgetBuild(char *label, UI_WidgetFlags flags) {
+    UI_Widget *widget = nullptr;
+    UI_Widget *found = UI_FindWidget(label);
+    if (found) {
+        widget = UI_WidgetCopy(found);
+    } else {
+        widget = UI_WidgetCreate(label);
+    }
+    widget->flags = flags;
+
+    widget->first = widget->last = nullptr;
+    widget->next = widget->prev = nullptr;
+
+    UI_Widget *parent = UI_GetParent();
+
+    if (parent != nullptr) {
+        if (parent->first) {
+            widget->prev = parent->last;
+            parent->last->next = widget;
+            parent->last = widget;
+        } else {
+            parent->first = parent->last = widget;
+        }
+    } else {
+        ui_state.root = widget;
+    }
+    widget->parent = parent;
+
+    widget->bg_color = ui_state.bg_color_stack.top();
+    widget->border_color = ui_state.border_color_stack.top();
+    widget->text_color = ui_state.text_color_stack.top();
+    
+    ui_state.widget_list.push_back(widget);
+    return widget; 
+}
+
+void UI_PushPrefSize(UI_Axis axis, UI_Size size) {
+    switch (axis) {
+    case UI_Axis_X:
+        ui_state.pref_width_stack.push(size);
+        break;
+    case UI_Axis_Y:
+        ui_state.pref_height_stack.push(size);
+        break;
+    }
+    // ui_state.pref_size_stack.push(size);
+}
+
+UI_Size UI_PopPrefSize(UI_Axis axis) {
+    UI_Size size = {};
+    switch (axis) {
+    case UI_Axis_X:
+        size = !ui_state.pref_width_stack.empty() ? ui_state.pref_width_stack.top() : size;
+        if (!ui_state.pref_width_stack.empty()) ui_state.pref_width_stack.pop();
+        break;
+    case UI_Axis_Y:
+        size = !ui_state.pref_height_stack.empty() ? ui_state.pref_height_stack.top() : size;
+        if (!ui_state.pref_height_stack.empty()) ui_state.pref_height_stack.pop();
+    }
+    return size;
+}
+
+UI_Size UI_GetNextPrefSize(UI_Axis axis) {
+    UI_Size size{};
+    switch (axis) {
+    case UI_Axis_X:
+        size = !ui_state.pref_width_stack.empty() ? ui_state.pref_width_stack.top() : size;
+        break;
+    case UI_Axis_Y:
+        size = !ui_state.pref_height_stack.empty() ? ui_state.pref_height_stack.top() : size;
+        break;
+    }
+    return size;
+}
+
+void UI_LayoutCalcSizesRigid(UI_Widget *widget, UI_Axis axis) {
+    float size = 0;
+    switch (widget->pref_size[axis].type) {
+    case UI_Size_Pixels:
+        size = widget->pref_size[axis].value;
+        break;
+    case UI_Size_TextBounds: {
+        float padding = widget->pref_size[axis].value;
+        size = (axis == UI_Axis_X) ? (UI_GetTextWidth(widget->label, &ui_state.font_atlas) + padding) : UI_GetTextHeight(widget->label, &ui_state.font_atlas);
+        break;
+    }
+    }
+
+    widget->actual_size[axis] = size;
+
+    for (UI_Widget *child = widget->first; child != nullptr; child = child->next) {
+        UI_LayoutCalcSizesRigid(child, axis);
+    }
+}
+
+void UI_LayoutCalcSizesUpwardDependent(UI_Widget *widget, UI_Axis axis) {
+    switch (widget->pref_size[axis].type) {
+    case UI_Size_ParentPercent: {
+        UI_Widget *rigid = nullptr;
+        for (UI_Widget *p = widget->parent; p != nullptr; p = p->parent) {
+            UI_Size size = p->pref_size[axis];
+            if (size.type == UI_Size_Pixels || size.type == UI_Size_TextBounds) {
+                rigid = p;
+                break;
+            }
+        }
+        widget->actual_size[axis] = widget->pref_size[axis].value * rigid->actual_size[axis];
+        break;
+    }
+    default:
+        break;
+    }
+
+    for (UI_Widget *child = widget->first; child != nullptr; child = child->next) {
+        UI_LayoutCalcSizesUpwardDependent(child, axis);
+    }
+}
+
+void UI_LayoutCalcSizesDownwardDependent(UI_Widget *widget, UI_Axis axis) {
+    float children_sum = 0;
+    for (UI_Widget *child = widget->first; child != nullptr; child = child->next) {
+        UI_LayoutCalcSizesDownwardDependent(child, axis);
+        children_sum += child->actual_size[axis];
+    }
+        
+    switch (widget->pref_size[axis].type) {
+    case UI_Size_ChildrenSum:
+        widget->actual_size[axis] = children_sum;
+        break;
+    }
+}
+
+void UI_LayoutResolveSize(UI_Widget *widget, UI_Axis axis) {
+    UI_Widget *parent = widget->parent;
+    if (parent) {
+        widget->actual_size[axis] = UI_CLAMP(widget->actual_size[axis], 0, parent->actual_size[axis]);
+    }
+
+    for (UI_Widget *child = widget->first; child != nullptr; child = child->next) {
+        UI_LayoutResolveSize(child, axis);
+    }
+}
+
+void UI_LayoutPlaceWidgets(UI_Widget *widget, UI_Axis axis) {
+    float current_pos = 0;
+    for (UI_Widget *child = widget->first; child != nullptr; child = child->next) {
+        child->relative_pos[axis] = current_pos;
+
+        // NOTE: Move relative position in the layout axis for children
+        if (axis == widget->child_layout_axis) {
+            current_pos += child->actual_size[axis]; 
+        }
+    }
+
+    float absolute_pos = 0;
+    for (UI_Widget *p = widget; p != nullptr; p = p->parent) {
+        absolute_pos += p->relative_pos[axis];
+    }
+
+    widget->rect.p[axis] = absolute_pos;
+    widget->rect.width = widget->actual_size[UI_Axis_X];
+    widget->rect.height = widget->actual_size[UI_Axis_Y];
+
+    for (UI_Widget *child = widget->first; child != nullptr; child = child->next) {
+        UI_LayoutPlaceWidgets(child, axis);
+    }
+}
+
+void UI_LayoutRoot(UI_Widget *root, UI_Axis axis) {
+    UI_LayoutCalcSizesRigid(root, axis);
+    UI_LayoutCalcSizesUpwardDependent(root, axis);
+    UI_LayoutCalcSizesDownwardDependent(root, axis);
+    UI_LayoutResolveSize(root, axis);
+    UI_LayoutPlaceWidgets(root, axis);
+}
+
+void UI_NewFrame(HWND window) {
+    RECT client_rect;
+    GetClientRect(window, &client_rect);
+    UI_Vec2 dim = {(float)(client_rect.right - client_rect.left), (float)(client_rect.bottom - client_rect.top)};
+    ui_state.draw_data.target_size = dim;
+    ui_state.draw_data.target_pos = {0.0f, 0.0f};
+    ui_state.draw_data.vertex_count = 0;
+
+    // Clear layout stacks
+    STACK_CLEAR(ui_state.parent_stack);
+    STACK_CLEAR(ui_state.bg_color_stack);
+    STACK_CLEAR(ui_state.pref_width_stack);
+    STACK_CLEAR(ui_state.pref_height_stack);
+
+    ui_state.bg_color_stack.push(WHITE);
+    ui_state.border_color_stack.push(GRAY);
+    ui_state.text_color_stack.push(BLACK);
+
+    UI_Widget *root = UI_WidgetBuild("~Root", (UI_WidgetFlags)(UI_WidgetFlags_DrawBackground | UI_WidgetFlags_DrawBorder));
+    root->child_layout_axis = UI_Axis_Y;
+    root->rect = {0, 0, dim.x, dim.y};
+    root->pref_size[UI_Axis_X] = UI_SIZE_FIXED(dim.x);
+    root->pref_size[UI_Axis_Y] = UI_SIZE_FIXED(dim.y);
+    root->bg_color = WHITE;
+    root->border_color = WHITE;
+
+    ui_state.parent_stack.push(root);
+
+    // DX11
+    UI_DX11NewFrame();
+}
+
+void UI_DrawLayoutRoot(UI_Widget *widget) {
+    if (widget->flags & UI_WidgetFlags_DrawBackground) {
+        UI_DrawRect(widget->rect, widget->bg_color);
+    }
+    if (widget->flags & UI_WidgetFlags_DrawBorder) {
+        UI_DrawRectOutline(widget->rect, widget->border_color);
+    }
+    if (widget->flags & UI_WidgetFlags_DrawText) {
+        UI_DrawText(widget->label, &ui_state.font_atlas, UI_Vec2(widget->rect.x + widget->pref_size[UI_Axis_X].value / 2.0f, widget->rect.y));
+    }
+    if (widget->flags & UI_WidgetFlags_DrawHotEffects) {
+        UI_DrawRect(widget->rect, UI_Vec4(0.25f, 0.75f, 1.0f, 0.15f));
+    }
+    if (widget->flags & UI_WidgetFlags_DrawActiveEffects) {
+        UI_DrawRect(widget->rect, UI_Vec4(0.25f, 0.75f, 1.0f, 0.15f));
+    }
+
+    for (UI_Widget *child = widget->first; child != nullptr; child = child->next) {
+        UI_DrawLayoutRoot(child);
+    }
+}
+
+void UI_EndFrame() {
+    ui_state.mouse_pressed = false;
+    ui_state.key_down = false;
+
+    UI_Widget *root = ui_state.root;
+    UI_LayoutRoot(root, UI_Axis_X);
+    UI_LayoutRoot(root, UI_Axis_Y);
+
+    UI_DrawLayoutRoot(root);
+
+    // Free old list
+    for (int i = 0; i < ui_state.old_list.size(); i++) {
+        UI_Widget *w = ui_state.old_list[i];
+        free(w);
+    }
+
+    // Swap current build data to old
+    ui_state.old_root = ui_state.root;
+    ui_state.root = nullptr;
+    ui_state.old_list.swap(ui_state.widget_list);
+    ui_state.widget_list.clear();
+
+    // NOTE: If active widget wasn't built this frame then no longer active
+    if (UI_AnyActive()) {
+        UI_Widget *active = UI_FindWidget(active_widget->label);
+        if (active == nullptr) {
+            active_widget = nullptr;
+        }    
+    }
+
+    UI_Render();
+}
+
 
 // NOTE: UI Widget Objects
 
@@ -781,10 +981,67 @@ bool UI_InRect(int x, int y, UI_Rect rect) {
 
 */
 
+bool UI_ButtonBehavior(UI_Widget *widget, bool *hover) {
+    bool clicked = false;
+    bool inside = false;
+    if (widget) {
+        UI_Rect rect = widget->rect;
+        inside = UI_InRect(ui_state.mouse_x, ui_state.mouse_y, rect);
 
+        if (UI_IsActive(widget)) {
+            if (ui_state.mouse_pressed) {
+                if (inside) clicked = true;
+                UI_WidgetDeactivate();
+            }
+        } else if (inside) {
+            if (ui_state.mouse_down) UI_WidgetActivate(widget);
+        }
+
+    }
+    if (hover) {
+        *hover = inside;
+    }
+
+    return clicked;
+}
+
+void UI_RowBegin(char *label) {
+    UI_Widget *widget = UI_WidgetBuild(label, (UI_WidgetFlags)(UI_WidgetFlags_DrawBackground | UI_WidgetFlags_DrawBorder));
+    widget->pref_size[UI_Axis_X] = UI_SIZE_PARENT(1.0f);
+    widget->pref_size[UI_Axis_Y] = UI_SIZE_FIXED(ui_state.font_atlas.glyph_height);
+    widget->child_layout_axis = UI_Axis_X;
+    // UI_PushPrefSize(UI_Axis_X, UI_SIZE_TEXT(1.0f));
+    // UI_PushPrefSize(UI_Axis_Y, UI_SIZE_TEXT(1.0f));
+    ui_state.parent_stack.push(widget);
+}
+
+void UI_RowEnd() {
+    ui_state.parent_stack.pop();
+    UI_PopPrefSize(UI_Axis_X);
+    UI_PopPrefSize(UI_Axis_Y);
+}
+
+bool UI_Button(char *label) {
+    UI_Widget *widget = UI_FindWidget(label);
+    bool hover = false;
+    bool clicked = UI_ButtonBehavior(widget, &hover);
+
+    UI_Widget *new_widget = UI_WidgetBuild(label, (UI_WidgetFlags)(UI_WidgetFlags_DrawText | UI_WidgetFlags_DrawBorder | UI_WidgetFlags_DrawBackground));
+    new_widget->pref_size[UI_Axis_X] = UI_SIZE_TEXT(20.0f);
+    new_widget->pref_size[UI_Axis_Y] = UI_SIZE_TEXT(0.0f);
+
+    if (hover) {
+        new_widget->flags = (UI_WidgetFlags)((int)new_widget->flags | UI_WidgetFlags_DrawHotEffects);
+    }
+    if (UI_IsActive(new_widget)) {
+        new_widget->flags = (UI_WidgetFlags)((int)new_widget->flags | UI_WidgetFlags_DrawActiveEffects);
+    }
+
+    return clicked;
+}
+
+#if 0
 void UI_Label(char *label) {
-    UI_Vec2 position = ui_state.next_position;
-
     float width = UI_GetTextWidth(label, &ui_state.font_atlas) + 10.0f;
     float height = 20.0f;
     UI_Rect rect = {position.x, position.y, width, height};
@@ -804,66 +1061,9 @@ void UI_Labelf(char *fmt, ...) {
     UI_Label(buffer);
 }
 
-bool UI_ButtonBehavior(UI_Widget *widget, bool *hover) {
-    bool result = false;
-    UI_Rect rect = widget->rect;
-    bool hot = UI_InRect(ui_state.mouse_x, ui_state.mouse_y, rect);
-
-    if (UI_IsActive(widget)) {
-        if (ui_state.mouse_pressed) {
-            if (hot) result = true;
-            UI_WidgetDeactivate();
-        }
-    } else if (hot) {
-        if (ui_state.mouse_down) UI_WidgetActivate(widget);
-    }
-
-    *hover = hot;
-    return result;
-}
-
-bool UI_Button(char *label) {
-    bool result = false;
-    UI_Vec2 position = ui_state.next_position;
-    
-    UI_Widget *widget = UI_FindWidget(label);
-    bool just_created = widget == nullptr;
-    widget = UI_WidgetCreate(label);
-    UI_WidgetPush(widget);
-
-    float text_width = UI_GetTextWidth(label, &ui_state.font_atlas);
-    
-    UI_Rect rect = {position.x, position.y, text_width + 20, 28};
-    bool hover = UI_InRect(ui_state.mouse_x, ui_state.mouse_y, rect);
-    
-    if (!UI_AnyActive()) {
-        if (hover && ui_state.mouse_down) {
-            UI_WidgetActivate(widget);
-        }
-    }
-    
-    UI_Vec4 color = hover && (!UI_AnyActive() || UI_IsActive(widget)) ? LIGHTGRAY : GRAY;
-
-    UI_DrawRectOutline(rect, color);
-    UI_DrawText(label, &ui_state.font_atlas, {position.x + 10, position.y + 7});
-
-    if (UI_IsActive(widget) && ui_state.mouse_pressed) {
-        UI_WidgetDeactivate();
-        if (hover) {
-            result = true;
-        }
-    }
-
-    ui_state.next_position = UI_Vec2(NEXT_PX, rect.y + rect.height + 20.0f);
-
-    return result;
-}
-
-
-#define CLAMP(V, MIN, MAX) (V < MIN ? MIN: V > MAX ? MAX : V)
 void UI_Slider(char *label, float *f, float min, float max) {
     float d = max - min;
-    *f = CLAMP(*f, min, max);
+    *f = UI_CLAMP(*f, min, max);
 
     UI_Widget *widget = UI_FindWidget(label);
     bool just_created = widget == nullptr;
@@ -889,7 +1089,7 @@ void UI_Slider(char *label, float *f, float min, float max) {
     if (UI_IsActive(widget)) {
         if (ui_state.mouse_down) {
             slider_position.x = (float)ui_state.mouse_x;
-            slider_position.x = CLAMP(slider_position.x, bar_rect.x, bar_rect.x + bar_rect.width);
+            slider_position.x = UI_CLAMP(slider_position.x, bar_rect.x, bar_rect.x + bar_rect.width);
             float r = (slider_position.x - bar_rect.x) / (float)(bar_rect.width);
             float new_f =  min + d * r;
             *f = new_f;
@@ -1065,11 +1265,4 @@ bool UI_RadioButton(char *label, int *out, int value) {
     ui_state.next_position = UI_Vec2(NEXT_PX, rect.y + rect.height + 20.0f);
     return result;
 }
-
-void UI_BeginRow() {
-    // Set Layout to use size of contents next
-}
-
-void UI_EndRow() {
-    // Set Layout to use size of contents next
-}
+#endif
